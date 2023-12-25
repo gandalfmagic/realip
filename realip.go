@@ -1,36 +1,46 @@
 package realip
 
 import (
-	"fmt"
+	"context"
 	"net"
 	"net/http"
 	"strings"
+
+	"github.com/gin-gonic/gin"
+	"github.com/labstack/echo/v4"
 )
 
-func Get(r *http.Request) (string, error) {
-	ip := r.Header.Get("X-Real-Ip")
-	netIP := net.ParseIP(extractIP(ip))
-	if netIP != nil {
-		return ip, nil
-	}
+type contextKey struct{}
 
-	ips := r.Header.Get("X-Forwarded-For")
-	splitIps := strings.Split(ips, ",")
-	for _, ip = range splitIps {
-		realIP := ip
+const contextKeyString = "github.com/gandalfmagic/realip"
 
-		netIP = net.ParseIP(extractIP(ip))
-		if netIP != nil {
-			return realIP, nil
+func Get(r *http.Request) string {
+	trueClientIP := http.CanonicalHeaderKey("True-Client-IP")
+	xRealIP := http.CanonicalHeaderKey("X-Real-IP")
+	xForwardedFor := http.CanonicalHeaderKey("X-Forwarded-For")
+
+	var realIP string
+
+	if ip := r.Header.Get(trueClientIP); ip != "" {
+		realIP = ip
+	} else if ip = r.Header.Get(xRealIP); ip != "" {
+		realIP = ip
+	} else if ipList := r.Header.Get(xForwardedFor); ipList != "" {
+		for _, ip = range strings.Split(ipList, ",") {
+			ip = strings.TrimSpace(ip)
+			validIp := net.ParseIP(extractIP(ip))
+			if validIp != nil && !validIp.IsPrivate() {
+				realIP = ip
+				break
+			}
 		}
 	}
 
-	netIP = net.ParseIP(extractIP(r.RemoteAddr))
-	if netIP != nil {
-		return r.RemoteAddr, nil
+	if realIP == "" || net.ParseIP(extractIP(realIP)) == nil {
+		return ""
 	}
 
-	return "", fmt.Errorf("no valid source ip found in the request headers")
+	return realIP
 }
 
 // Return the ip address from an "ip:port" formatted string
@@ -68,4 +78,59 @@ func last(s string, b byte) int {
 		}
 	}
 	return i
+}
+
+func FromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(contextKey{}).(string); ok {
+		return v
+	}
+
+	return ""
+}
+
+func HTTPMiddleware(h http.Handler) http.Handler {
+	fn := func(w http.ResponseWriter, r *http.Request) {
+		if realIP := Get(r); realIP != "" {
+			r.WithContext(context.WithValue(r.Context(), contextKey{}, realIP))
+		}
+		h.ServeHTTP(w, r)
+	}
+
+	return http.HandlerFunc(fn)
+}
+
+func FromEchoContext(c echo.Context) string {
+	if v, ok := c.Get(contextKeyString).(string); ok {
+		return v
+	}
+
+	return ""
+}
+
+func EchoMiddleware(next echo.HandlerFunc) echo.HandlerFunc {
+	return func(c echo.Context) error {
+		if realIP := Get(c.Request()); realIP != "" {
+			c.Set(contextKeyString, realIP)
+		}
+
+		return next(c)
+	}
+}
+
+func FromGinContext(c *gin.Context) string {
+	if v, ok := c.Value(contextKeyString).(string); ok {
+		return v
+	}
+
+	return ""
+}
+
+func GinMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if realIP := Get(c.Request); realIP != "" {
+			c.Set(contextKeyString, realIP)
+		}
+
+		c.Next()
+	}
 }
